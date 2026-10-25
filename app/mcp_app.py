@@ -19,29 +19,58 @@ PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 
 
 def _build_transport_security() -> TransportSecuritySettings:
-    """The MCP SDK blocks any Host header that is not localhost, which would
-    break every request once this is deployed behind a public domain. Add the
-    real host, and allow turning the check off entirely via env var."""
+    """The MCP SDK rejects any Host header that is not localhost, which makes
+    every request fail with "Invalid Host header" the moment you put the
+    server behind a public domain and a reverse proxy.
+
+    Two ways out, and we use both:
+
+    1. PUBLIC_URL tells the SDK your real hostname, so it can allow it.
+       The SDK does an EXACT string match on the Host header, so we register
+       the bare host *and* a "host:*" wildcard for when a proxy appends a
+       port.
+
+    2. If an API key is configured we turn the check off entirely. It is
+       redundant there: the API key middleware wraps the whole app and has
+       already rejected every unauthenticated request before the SDK's Host
+       check ever runs. The check exists to stop a malicious web page from
+       driving a browser at a *localhost* MCP server; against a public,
+       key-authenticated endpoint it is pure friction.
+
+    Set PERCHANCE_DISABLE_DNS_REBINDING_PROTECTION=1 to force option 2.
+    """
+    flag = (os.environ.get("PERCHANCE_DISABLE_DNS_REBINDING_PROTECTION") or "").lower()
+    forced_off = flag in ("1", "true", "yes", "on")
+    forced_on = flag in ("0", "false", "no", "off")
+
+    if forced_off or (config.API_KEY and not forced_on):
+        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
     hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
     origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
 
+    def _register(raw: str) -> None:
+        host = raw.split("//")[-1].split("/")[0].strip()
+        if not host:
+            return
+        bare = host.split(":")[0]
+        for item in (host, bare):
+            if item and item not in hosts:
+                hosts.append(item)
+        for item in (f"{bare}:*",):
+            if item not in hosts:
+                hosts.append(item)
+        for item in (f"https://{bare}", f"http://{bare}"):
+            if item not in origins:
+                origins.append(item)
+
     if PUBLIC_URL:
-        host = PUBLIC_URL.split("//")[-1].split("/")[0]
-        if host and host not in hosts:
-            hosts.append(host)
-            origins.append(f"https://{host}")
-            origins.append(f"http://{host}")
+        _register(PUBLIC_URL)
 
     extra = (os.environ.get("PERCHANCE_ALLOWED_HOSTS") or "").strip()
     for item in extra.split(","):
-        item = item.strip()
-        if item:
-            hosts.append(item)
-            origins.append(f"https://{item}")
-
-    disabled = (os.environ.get("PERCHANCE_DISABLE_DNS_REBINDING_PROTECTION") or "").lower()
-    if disabled in ("1", "true", "yes", "on"):
-        return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+        if item.strip():
+            _register(item)
 
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

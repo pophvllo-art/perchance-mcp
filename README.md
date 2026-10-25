@@ -233,12 +233,23 @@ PERCHANCE_API_KEY = <your 32+ char key>
 PUBLIC_URL = https://<the-url-cloady-gives-you>
 ```
 
-`PUBLIC_URL` is not optional in practice: the MCP SDK blocks any `Host`
-header that is not `localhost`, so without it every MCP request is rejected
-with **421 Misdirected Request**. Setting `PUBLIC_URL` teaches it your real
-hostname. (If you cannot know the URL in advance, set
-`PERCHANCE_DISABLE_DNS_REBINDING_PROTECTION=1` instead and rely on the API
-key alone.)
+`PUBLIC_URL` matters: the MCP SDK blocks any `Host` header that is not
+`localhost`, so without it every MCP request fails with
+
+```
+Error while sending message: Streamable HTTP error: Invalid Host header
+```
+
+Setting `PUBLIC_URL` to your exact hostname fixes it. If a proxy appends a
+port to the `Host` header, the code registers a wildcard for that too.
+
+If you ever cannot know the URL in advance, set
+`PERCHANCE_DISABLE_DNS_REBINDING_PROTECTION=1` instead. The server also turns
+this check off automatically whenever an API key is configured, because the
+API key middleware has already rejected every unauthenticated request by then
+- the Host check exists to protect *localhost* MCP servers from a malicious
+web page, and against a public key-authenticated endpoint it is pure
+friction.
 
 > **Do not put the key in GitHub.** Put it in Cloady's environment tab. If you
 > ever commit it by accident it is in your git history forever — change the
