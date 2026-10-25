@@ -190,10 +190,27 @@ GitHub Container Registry as:
 ghcr.io/pophvllo-art/perchance-mcp:latest
 ```
 
-To use it, make the package public once:
-GitHub -> your profile -> **Packages** -> `perchance-mcp` -> **Package
-settings** -> **Change visibility** -> **Public**. Then in Cloady pick
-**Deploy a Docker image** and use that reference.
+It is also tagged with the commit SHA (`...:0f0ea2a`), so you can pin an
+exact build. The image is about **545 MB compressed** (Chromium is most of
+it) and exposes port `8080`.
+
+GHCR packages are **private by default**, so flip it to public once:
+
+- GitHub -> your profile -> **Packages** -> `perchance-mcp` -> **Package
+  settings** -> **Change visibility** -> **Public**
+
+or from the API, with a token that has the `write:packages` scope:
+
+```bash
+curl -X PATCH \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Content-Type: application/json" \
+  -d '{"visibility":"public"}' \
+  https://api.github.com/users/pophvllo-art/packages/container/perchance-mcp
+```
+
+Then in Cloady pick **Deploy a Docker image** and use that reference.
 
 Either way the result is the same container. Option A is one less moving
 part; Option B is faster to redeploy because the build already happened.
@@ -243,6 +260,18 @@ browser ready
 Cloady gives you a free TLS certificate, so the URL is `https://...`.
 
 ---
+
+### 5f. Which option do I pick?
+
+| | Option A (build from repo) | Option B (prebuilt image) |
+|---|---|---|
+| Setup | none | flip the package public |
+| First deploy | builds on Cloady (5-10 min) | pulls a 545 MB image (2-3 min) |
+| Every redeploy | rebuilds | seconds, just a new tag |
+| Needs GHCR public | no | yes |
+
+Start with **Option A**. It is one less thing to get wrong, and you can move
+to Option B later without changing a line of code.
 
 ## 6. Verify it is alive
 
