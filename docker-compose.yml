@@ -1,0 +1,19 @@
+services:
+  perchance-mcp:
+    build: .
+    container_name: perchance-mcp
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    shm_size: "512mb"
+    env_file:
+      - .env
+    environment:
+      PORT: "8080"
+      PERCHANCE_BROWSER_DIR: "/data/browser"
+      PERCHANCE_IMAGE_DIR: "/data/images"
+    volumes:
+      - perchance-data:/data
+
+volumes:
+  perchance-data:
