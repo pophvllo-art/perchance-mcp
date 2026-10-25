@@ -1,5 +1,7 @@
 # perchance-mcp
 
+[![CI](https://github.com/pophvllo-art/perchance-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pophvllo-art/perchance-mcp/actions/workflows/ci.yml)
+
 A self-hosted image generator that speaks **both** MCP and the OpenAI images API.
 
 | Endpoint | Use it for |
@@ -175,7 +177,26 @@ Cloady's free workspace allows **0.5 vCPU, 1 GB RAM, 5 GB SSD** and
 
 ### 5b. Build
 
-Cloady finds the `Dockerfile` automatically. Nothing to change.
+You have two options.
+
+**Option A - build from the repo (simplest).** Cloady finds the `Dockerfile`
+automatically. Nothing to change.
+
+**Option B - deploy a prebuilt image.** A GitHub Actions workflow
+(`.github/workflows/ci.yml`) builds the image on every push and publishes it to
+GitHub Container Registry as:
+
+```
+ghcr.io/pophvllo-art/perchance-mcp:latest
+```
+
+To use it, make the package public once:
+GitHub -> your profile -> **Packages** -> `perchance-mcp` -> **Package
+settings** -> **Change visibility** -> **Public**. Then in Cloady pick
+**Deploy a Docker image** and use that reference.
+
+Either way the result is the same container. Option A is one less moving
+part; Option B is faster to redeploy because the build already happened.
 
 ### 5c. Resources
 
