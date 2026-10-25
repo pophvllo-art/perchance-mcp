@@ -42,6 +42,8 @@ DISPLAY = _env_str("PERCHANCE_DISPLAY", ":99")
 USE_XVFB = _env_bool("PERCHANCE_USE_XVFB", True)
 # How long a tool call waits for the browser to finish booting.
 READY_TIMEOUT = _env_int("PERCHANCE_READY_TIMEOUT", 180)
+# How long the embed page gets to solve Turnstile and mint a userKey.
+IDENTITY_TIMEOUT = _env_int("PERCHANCE_IDENTITY_TIMEOUT", 120)
 
 # ── perchance upstream ──────────────────────────────────────────────────────
 PERCHANCE_ORIGIN = _env_str("PERCHANCE_ORIGIN", "https://perchance.org")

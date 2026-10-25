@@ -13,7 +13,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("PERCHANCE_API_KEY", "test-key")
 os.environ.setdefault("PERCHANCE_IMAGE_DIR", "/tmp/perchance-test-images")
 
+from app import config as app_config  # noqa: E402
 from app import mcp_app  # noqa: E402
+
+
+def _reload():
+    """app.config caches env vars at import time, so reload it too."""
+    importlib.reload(app_config)
+    importlib.reload(mcp_app)
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -65,15 +72,35 @@ def test_multiple_images():
 
 
 def test_public_host_allowed():
+    """With NO API key the protection stays on and must allow the real host."""
+    saved_key = os.environ.pop("PERCHANCE_API_KEY", None)
     os.environ["PUBLIC_URL"] = "https://perchance-example.cloady.io"
-    importlib.reload(mcp_app)
-    ts = mcp_app.mcp.settings.transport_security
-    assert "perchance-example.cloady.io" in ts.allowed_hosts, ts.allowed_hosts
-    assert "https://perchance-example.cloady.io" in ts.allowed_origins, ts.allowed_origins
-    assert ts.enable_dns_rebinding_protection is True
-    print("public host is allowed OK")
-    del os.environ["PUBLIC_URL"]
-    importlib.reload(mcp_app)
+    try:
+        _reload()
+        ts = mcp_app.mcp.settings.transport_security
+        assert ts.enable_dns_rebinding_protection is True
+        assert "perchance-example.cloady.io" in ts.allowed_hosts, ts.allowed_hosts
+        assert "perchance-example.cloady.io:*" in ts.allowed_hosts, ts.allowed_hosts
+        assert "https://perchance-example.cloady.io" in ts.allowed_origins, ts.allowed_origins
+        print("public host is allowed while protection is on OK")
+    finally:
+        del os.environ["PUBLIC_URL"]
+        if saved_key is not None:
+            os.environ["PERCHANCE_API_KEY"] = saved_key
+        importlib.reload(mcp_app)
+
+
+def test_host_check_off_when_api_key_set():
+    """With an API key the check is redundant (auth already ran) and is off."""
+    os.environ["PERCHANCE_API_KEY"] = "test-key"
+    os.environ.pop("PUBLIC_URL", None)
+    try:
+        _reload()
+        ts = mcp_app.mcp.settings.transport_security
+        assert ts.enable_dns_rebinding_protection is False
+        print("host check is auto-disabled when an API key is set OK")
+    finally:
+        _reload()
 
 
 def test_error_is_graceful():
@@ -101,5 +128,6 @@ if __name__ == "__main__":
     test_tool_returns_image_block()
     test_multiple_images()
     test_public_host_allowed()
+    test_host_check_off_when_api_key_set()
     test_error_is_graceful()
     print("\nALL INTEGRATION TESTS PASSED")

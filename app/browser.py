@@ -26,6 +26,8 @@ import json
 import os
 import subprocess
 import time
+import urllib.parse
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config
@@ -37,45 +39,47 @@ except Exception:  # pragma: no cover
 
 
 # ── JS that runs inside the page ────────────────────────────────────────────
-JS_EMBED_WRAPPER = """
-(params) => {
+# The embed page only talks to a PARENT window, so we must host it in an
+# iframe. We keep ONE iframe alive and navigate it between prompts instead of
+# recreating it: same origin, same Chromium profile, so the Turnstile
+# clearance and the userKey in localStorage survive and later generations
+# skip the slow verification entirely.
+JS_ENSURE_WRAPPER = """
+() => {
+    if (window.__genReady) return 'ready';
     window.__genResult = null;
     window.addEventListener('message', function(e) {
-        if(e.source === document.getElementById('genFrame').contentWindow && e.data && e.data.type === 'finished') {
+        let f = document.getElementById('genFrame');
+        if(f && e.source === f.contentWindow && e.data && e.data.type === 'finished') {
             window.__genResult = { dataUrl: e.data.dataUrl, seedUsed: e.data.seedUsed };
         }
     });
-
-    let hashData = {
-        prompt: params.prompt,
-        seed: params.seed,
-        resolution: params.resolution,
-        guidanceScale: params.guidance,
-        negativePrompt: params.negative || '',
-        saveChannel: params.channel || '',
-        saveTitle: params.prompt || '',
-        saveDescription: params.negative || '',
-        requestId: Math.random().toString(),
-        iframeId: 'genFrame',
-        hideGalleryButtons: true,
-    };
-    let embedUrl = 'https://image-generation.perchance.org/embed#' + encodeURIComponent(JSON.stringify(hashData));
-
     let f = document.createElement('iframe');
     f.id = 'genFrame';
-    f.src = embedUrl;
-    f.style.cssText = 'position:fixed;top:0;left:0;width:640px;height:640px;border:0;';
+    f.style.cssText = 'position:fixed;top:0;left:0;width:1280px;height:720px;border:0;';
     document.body.appendChild(f);
-    return 'fired';
+    window.__genReady = true;
+    return 'ready';
 }
 """
 
-JS_CHECK_STATUS = """() => {
-    let out = {};
-    out.userKey = localStorage['userKey-0'] || '';
-    out.adAccessCode = localStorage.adAccessCode || '';
-    // newer builds namespace the key: generation-v2:<browserId>:userKey-0
+JS_NAVIGATE_IFRAME = """
+(url) => {
+    let f = document.getElementById('genFrame');
+    if (!f) return 'no_iframe';
+    window.__genResult = null;
+    f.src = url;
+    return 'navigating';
+}
+"""
+
+# Read from the EMBED frame when there is one: the userKey and adAccessCode
+# live in the embed origin's localStorage, while our wrapper page is about:blank.
+JS_READ_IDENTITY = """() => {
+    let out = { userKey: '', adAccessCode: '', url: location.href.substring(0, 80) };
     try {
+        out.userKey = localStorage['userKey-0'] || '';
+        out.adAccessCode = localStorage.adAccessCode || '';
         for (let i = 0; i < localStorage.length; i++) {
             let k = localStorage.key(i);
             if (k && /userKey-0$/.test(k) && !out.userKey) {
@@ -83,8 +87,7 @@ JS_CHECK_STATUS = """() => {
                 out.userKeyStorageKey = k;
             }
         }
-    } catch(e) {}
-    out.url = location.href.substring(0, 80);
+    } catch(e) { out.error = String(e); }
     let wc = document.getElementById('waitingContentEl');
     if (wc) out.waitingContent = wc.innerText.substring(0, 200);
     return out;
@@ -129,6 +132,7 @@ class BrowserSession:
         self._lock = asyncio.Lock()
         self._user_key: str = ""
         self._ad_code: str = ""
+        self._wrapper_ready: bool = False
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def start_background(self) -> None:
@@ -197,6 +201,20 @@ class BrowserSession:
         )
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         await self._load_embed(warmup=True)
+
+        # Now switch to our wrapper page and host the embed in an iframe.
+        # The Cloudflare cookie is already in the profile, so the iframe
+        # passes straight through; then we let it solve Turnstile once so
+        # every later generation can skip that slow step.
+        await self._ensure_wrapper()
+        await self._navigate_iframe(self._embed_url("warmup", "512x512", -1, 7, ""))
+        identity = await self._wait_for_identity(config.IDENTITY_TIMEOUT)
+        if identity.get("userKey"):
+            self._user_key = identity["userKey"]
+            print("userKey obtained - later generations will be fast", flush=True)
+        else:
+            print("no userKey yet - the first generation may be slow", flush=True)
+
         self.ready = True
         self._ready_event.set()
         print("browser ready", flush=True)
@@ -241,30 +259,87 @@ class BrowserSession:
 
     # ── identity ─────────────────────────────────────────────────────────────
     async def refresh_identity(self) -> Tuple[str, str]:
-        """Return (userKey, adAccessCode) from the page."""
-        for _ in range(30):
-            try:
-                status = await self.page.evaluate(JS_CHECK_STATUS)
-            except Exception:
-                await asyncio.sleep(2)
-                continue
-            key = (status or {}).get("userKey") or ""
-            ad = (status or {}).get("adAccessCode") or ""
-            if key:
-                self._user_key = key
-            if ad:
-                self._ad_code = ad
-            if key and ad:
-                return key, ad
-            await asyncio.sleep(2)
-        raise BrowserError(
-            "could not obtain a userKey from the browser. The page said: "
-            f"{str(status)[:300]}"
-        )
+        """Return (userKey, adAccessCode) from the embed frame."""
+        status = await self._wait_for_identity(config.IDENTITY_TIMEOUT)
+        key = (status or {}).get("userKey") or ""
+        ad = (status or {}).get("adAccessCode") or ""
+        if key:
+            self._user_key = key
+        if ad:
+            self._ad_code = ad
+        return key, ad
 
     @property
     def user_key(self) -> str:
         return self._user_key
+
+    # ── the wrapper page and the persistent iframe ───────────────────────────
+    def _embed_url(self, prompt: str, resolution: str, seed: int, guidance: int,
+                   negative: str) -> str:
+        """Build the embed URL the way the official page does."""
+        hash_data = {
+            "prompt": prompt,
+            "seed": seed,
+            "resolution": resolution,
+            "guidanceScale": guidance,
+            "negativePrompt": negative or "",
+            "saveChannel": config.SAVE_CHANNEL,
+            "saveTitle": prompt,
+            "saveDescription": negative or "",
+            "requestId": str(uuid.uuid4()),
+            "iframeId": "genFrame",
+            "hideGalleryButtons": True,
+        }
+        blob = json.dumps(hash_data, separators=(",", ":"))
+        return "https://image-generation.perchance.org/embed#" + urllib.parse.quote(blob)
+
+    async def _ensure_wrapper(self) -> None:
+        if self._wrapper_ready:
+            return
+        await self.page.set_content(
+            "<!doctype html><html><head><meta charset='utf-8'><title>gen</title></head>"
+            "<body style='margin:0'></body></html>"
+        )
+        await self.page.evaluate(JS_ENSURE_WRAPPER)
+        self._wrapper_ready = True
+
+    async def _navigate_iframe(self, url: str) -> str:
+        await self._ensure_wrapper()
+        try:
+            return await self.page.evaluate(JS_NAVIGATE_IFRAME, url)
+        except Exception as exc:
+            print(f"could not navigate the embed frame: {exc}", flush=True)
+            self._wrapper_ready = False
+            return "error"
+
+    async def _embed_frame(self):
+        try:
+            for f in self.page.frames:
+                if "image-generation.perchance.org" in (f.url or ""):
+                    return f
+        except Exception:
+            pass
+        return None
+
+    async def _read_identity(self) -> Dict[str, Any]:
+        frame = await self._embed_frame()
+        if frame is None:
+            return {}
+        try:
+            return await frame.evaluate(JS_READ_IDENTITY)
+        except Exception:
+            return {}
+
+    async def _wait_for_identity(self, timeout: int) -> Dict[str, Any]:
+        """Wait for the embed to mint a userKey (Turnstile solve)."""
+        deadline = time.time() + timeout
+        last: Dict[str, Any] = {}
+        while time.time() < deadline:
+            last = await self._read_identity()
+            if last.get("userKey"):
+                return last
+            await asyncio.sleep(3)
+        return last
 
     # ── generation ───────────────────────────────────────────────────────────
     async def generate(
@@ -283,28 +358,10 @@ class BrowserSession:
     async def _generate_locked(
         self, prompt, resolution, seed, guidance, negative, timeout
     ) -> Dict[str, Any]:
-        try:
-            await self.page.set_content(
-                "<!doctype html><html><head><meta charset='utf-8'><title>gen</title></head>"
-                "<body style='margin:0'></body></html>"
-            )
-        except Exception as exc:
-            raise BrowserError(f"could not prepare the page: {exc}") from exc
-
-        try:
-            await self.page.evaluate(
-                JS_EMBED_WRAPPER,
-                {
-                    "prompt": prompt,
-                    "resolution": resolution,
-                    "seed": seed,
-                    "guidance": guidance,
-                    "negative": negative or "",
-                    "channel": config.SAVE_CHANNEL,
-                },
-            )
-        except Exception as exc:
-            raise BrowserError(f"could not start the embed frame: {exc}") from exc
+        url = self._embed_url(prompt, resolution, seed, guidance, negative)
+        state = await self._navigate_iframe(url)
+        if state == "error":
+            raise BrowserError("could not start the embed frame")
 
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -377,13 +434,12 @@ class BrowserSession:
             if self._boot_error:
                 info["error"] = self._boot_error
             return info
-        try:
-            status = await self.page.evaluate(JS_CHECK_STATUS)
-            info["user_key"] = "ok" if (status or {}).get("userKey") else "missing"
-            info["ad_access_code"] = "ok" if (status or {}).get("adAccessCode") else "missing"
-            info["page"] = str((status or {}).get("waitingContent") or "")[:120]
-        except Exception as exc:
-            info["error"] = str(exc)[:200]
+        frame = await self._embed_frame()
+        info["embed_frame"] = "present" if frame is not None else "missing"
+        identity = await self._read_identity()
+        info["user_key"] = "ok" if identity.get("userKey") else "missing"
+        info["ad_access_code"] = "ok" if identity.get("adAccessCode") else "missing"
+        info["page"] = str(identity.get("waitingContent") or "")[:120]
         return info
 
 

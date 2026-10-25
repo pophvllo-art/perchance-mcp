@@ -69,6 +69,7 @@ def build_app() -> Starlette:
     mcp_app = mcp.streamable_http_app()
     app = Starlette(
         routes=[
+            Route("/", health),
             Route("/health", health),
             Route("/status", status),
             Route("/v1/models", models),

@@ -33,7 +33,7 @@ class APIKeyMiddleware:
     """ASGI middleware that rejects requests without the right key."""
 
     def __init__(self, app: ASGIApp, api_key: str, allow_query: bool = True,
-                 exempt_paths: tuple = ("/health", "/status")) -> None:
+                 exempt_paths: tuple = ("/", "/health", "/status")) -> None:
         self.app = app
         self.api_key = api_key
         self.allow_query = allow_query
@@ -45,7 +45,9 @@ class APIKeyMiddleware:
             return
 
         path = scope.get("path", "")
-        if any(path.startswith(p) for p in self.exempt_paths):
+        if path in self.exempt_paths or any(
+            path.startswith(p) for p in self.exempt_paths if p != "/"
+        ):
             await self.app(scope, receive, send)
             return
 

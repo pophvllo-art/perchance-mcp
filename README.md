@@ -410,6 +410,16 @@ Add `"response_format": "b64_json"` to get the bytes inline instead of a URL.
   and get permanent CDN links. Blank = skip.
 - **One at a time.** Perchance queues one generation per user key; the
   browser session serialises requests with a lock.
+- **The first request after a cold start is the slow one.** The embed page
+  has to solve Turnstile before it will generate anything, and that can take
+  30-90 seconds. The server does that warm-up during boot, so it is already
+  paid for by the time you call the tool - but if the container has just
+  restarted, give it a minute before your first call or your MCP client may
+  hit its own timeout first.
+- **The embed runs in a persistent iframe.** We keep one iframe alive and
+  navigate it between prompts, so the Chromium profile keeps its clearance
+  and the userKey stays valid. Recreating the iframe every time would force
+  a fresh Turnstile solve on every single image.
 
 ## 10. Licence
 
